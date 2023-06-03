@@ -1,9 +1,13 @@
-// Copyright 2018-2022 the Deno authors. All rights reserved. MIT license.
-use super::transl8::{FromV8, ToV8};
+// Copyright 2018-2023 the Deno authors. All rights reserved. MIT license.
+use super::transl8::FromV8;
+use super::transl8::ToV8;
+use crate::error::value_to_type_str;
 use crate::magic::transl8::impl_magic;
 use crate::Error;
 use smallvec::SmallVec;
 use std::mem::size_of;
+
+const USIZE2X: usize = size_of::<usize>() * 2;
 
 #[derive(
   PartialEq,
@@ -18,18 +22,19 @@ use std::mem::size_of;
 )]
 #[as_mut(forward)]
 #[as_ref(forward)]
-pub struct ByteString(SmallVec<[u8; 16]>);
+pub struct ByteString(SmallVec<[u8; USIZE2X]>);
 impl_magic!(ByteString);
 
-// const-assert that Vec<u8> and SmallVec<[u8; 16]> have a same size.
+// const-assert that Vec<u8> and SmallVec<[u8; size_of::<usize>() * 2]> have a same size.
 // Note from https://docs.rs/smallvec/latest/smallvec/#union -
 //   smallvec can still be larger than Vec if the inline buffer is
 //   larger than two machine words.
-const _: () = assert!(size_of::<Vec<u8>>() == size_of::<SmallVec<[u8; 16]>>());
+const _: () =
+  assert!(size_of::<Vec<u8>>() == size_of::<SmallVec<[u8; USIZE2X]>>());
 
 impl ToV8 for ByteString {
   fn to_v8<'a>(
-    &self,
+    &mut self,
     scope: &mut v8::HandleScope<'a>,
   ) -> Result<v8::Local<'a, v8::Value>, crate::Error> {
     let v =
@@ -45,7 +50,7 @@ impl FromV8 for ByteString {
     value: v8::Local<v8::Value>,
   ) -> Result<Self, crate::Error> {
     let v8str = v8::Local::<v8::String>::try_from(value)
-      .map_err(|_| Error::ExpectedString)?;
+      .map_err(|_| Error::ExpectedString(value_to_type_str(value)))?;
     if !v8str.contains_only_onebyte() {
       return Err(Error::ExpectedLatin1);
     }
