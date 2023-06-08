@@ -21,6 +21,7 @@ use deno_core::error::AnyError;
 use deno_core::futures::TryFutureExt;
 use deno_core::op;
 use deno_core::serde_v8;
+use deno_core::serde_v8::from_v8;
 use deno_core::task::spawn;
 use deno_core::task::JoinHandle;
 use deno_core::v8;
@@ -215,10 +216,11 @@ pub fn op_http_set_promise_complete(slab_id: SlabId, status: u16) {
   http.complete();
 }
 
-#[op]
-pub fn op_http_get_request_method_and_url<HTTP>(
+#[op(v8)]
+pub fn op_http_get_request_method_and_url<'scope, HTTP>(
+  scope: &mut v8::HandleScope<'scope>,
   slab_id: SlabId,
-) -> (String, Option<String>, String, String, Option<u16>)
+) -> serde_v8::Value<'scope>
 where
   HTTP: HttpPropertyExtractor,
 {
@@ -231,20 +233,54 @@ where
     &request_parts.headers,
   );
 
+  let method: v8::Local<v8::Value> = v8::String::new_from_utf8(
+    scope,
+    request_parts.method.as_str().as_bytes(),
+    v8::NewStringType::Normal,
+  )
+  .unwrap()
+  .into();
+
+  let authority: v8::Local<v8::Value> = match request_properties.authority {
+    Some(authority) => v8::String::new_from_utf8(
+      scope,
+      authority.as_ref(),
+      v8::NewStringType::Normal,
+    )
+    .unwrap()
+    .into(),
+    None => v8::undefined(scope).into(),
+  };
+
   // Only extract the path part - we handle authority elsewhere
   let path = match &request_parts.uri.path_and_query() {
     Some(path_and_query) => path_and_query.to_string(),
     None => "".to_owned(),
   };
 
-  // TODO(mmastrac): Passing method can be optimized
-  (
-    request_parts.method.as_str().to_owned(),
-    request_properties.authority,
-    path,
-    String::from(request_info.peer_address.as_ref()),
-    request_info.peer_port,
+  let path: v8::Local<v8::Value> =
+    v8::String::new_from_utf8(scope, path.as_ref(), v8::NewStringType::Normal)
+      .unwrap()
+      .into();
+
+  let peer_address: v8::Local<v8::Value> = v8::String::new_from_utf8(
+    scope,
+    request_info.peer_address.as_bytes(),
+    v8::NewStringType::Normal,
   )
+  .unwrap()
+  .into();
+
+  let port: v8::Local<v8::Value> = match request_info.peer_port {
+    Some(port) => v8::Integer::new(scope, port.into()).into(),
+    None => v8::undefined(scope).into(),
+  };
+
+  let vec = [method, authority, path, peer_address, port];
+  let array = v8::Array::new_with_elements(scope, vec.as_slice());
+  let array_value: v8::Local<v8::Value> = array.into();
+
+  array_value.into()
 }
 
 #[op]
@@ -349,17 +385,33 @@ pub fn op_http_set_response_header(slab_id: SlabId, name: &str, value: &str) {
   resp_headers.append(name, value);
 }
 
-#[op]
-pub fn op_http_set_response_headers(slab_id: SlabId, headers: Vec<ByteString>) {
+#[op(v8)]
+fn op_http_set_response_headers(
+  scope: &mut v8::HandleScope,
+  slab_id: SlabId,
+  headers: serde_v8::Value,
+) {
   let mut http = slab_get(slab_id);
   // TODO(mmastrac): Invalid headers should be handled?
   let resp_headers = http.response().headers_mut();
-  resp_headers.reserve(headers.len());
-  for header in headers.chunks_exact(2) {
-    // These are valid latin-1 strings
-    let name = HeaderName::from_bytes(&header[0]).unwrap();
-    let value = HeaderValue::from_bytes(&header[1]).unwrap();
-    resp_headers.append(name, value);
+
+  let arr = v8::Local::<v8::Array>::try_from(headers.v8_value).unwrap();
+
+  let len = arr.length();
+  let header_len = len * 2;
+  resp_headers.reserve(header_len.try_into().unwrap());
+
+  for i in 0..len {
+    let item = arr.get_index(scope, i).unwrap();
+    let pair = v8::Local::<v8::Array>::try_from(item).unwrap();
+    let name = pair.get_index(scope, 0).unwrap();
+    let value = pair.get_index(scope, 1).unwrap();
+
+    let v8_name: ByteString = from_v8(scope, name).unwrap();
+    let v8_value: ByteString = from_v8(scope, value).unwrap();
+    let header_name = HeaderName::from_bytes(&v8_name).unwrap();
+    let header_value = HeaderValue::from_bytes(&v8_value).unwrap();
+    resp_headers.append(header_name, header_value);
   }
 }
 
